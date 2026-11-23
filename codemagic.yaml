@@ -22,6 +22,11 @@ workflows:
         script: |
           brew install xcodegen
           xcodegen generate
+      - name: Resolve Swift packages
+        script: |
+          xcodebuild -resolvePackageDependencies \
+            -project SingMatch.xcodeproj \
+            -scheme SingMatch
       - name: Set up code signing
         script: xcode-project use-profiles
       - name: Set build number (one higher than the latest on TestFlight)
