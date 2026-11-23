@@ -1,0 +1,42 @@
+workflows:
+  singmatch-ios:
+    name: Sing Match iOS
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: Berfau ASC
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.stevenwilliams.singmatch
+      vars:
+        APP_ID: 6838518656
+      xcode: latest
+    scripts:
+      - name: Download the vocal separation model (bundled into the app)
+        script: |
+          curl -L --fail -o SingMatch/Resources/vocals.onnx \
+            https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx
+          ls -la SingMatch/Resources/vocals.onnx
+      - name: Generate Xcode project
+        script: |
+          brew install xcodegen
+          xcodegen generate
+      - name: Set up code signing
+        script: xcode-project use-profiles
+      - name: Set build number (one higher than the latest on TestFlight)
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_ID" || echo 0)
+          agvtool new-version -all $((LATEST + 1))
+      - name: Build IPA
+        script: |
+          xcode-project build-ipa \
+            --project SingMatch.xcodeproj \
+            --scheme SingMatch
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
