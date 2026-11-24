@@ -2,7 +2,7 @@ workflows:
   singmatch-ios:
     name: Sing Match iOS
     instance_type: mac_mini_m2
-    max_build_duration: 60
+    max_build_duration: 90
     integrations:
       app_store_connect: Berfau ASC
     environment:
@@ -12,21 +12,27 @@ workflows:
       vars:
         APP_ID: 6838518656
       xcode: latest
+    cache:
+      cache_paths:
+        - $HOME/.cache/uv
     scripts:
-      - name: Download the vocal separation model (bundled into the app)
+      - name: Build the vocal separation model (ONNX to Core ML)
         script: |
-          curl -L --fail -o SingMatch/Resources/vocals.onnx \
+          set -e
+          curl -L --fail -o /tmp/vocals.onnx \
             https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx
-          ls -la SingMatch/Resources/vocals.onnx
+          brew install uv
+          uv venv -p 3.11 /tmp/cmenv
+          source /tmp/cmenv/bin/activate
+          uv pip install "torch==2.7.0" "torchvision==0.22.0" "coremltools==9.0" onnx onnx2torch onnxruntime "numpy<2"
+          python scripts/convert_model.py /tmp/vocals.onnx /tmp/VocalsModel.mlpackage
+          rm -rf SingMatch/Resources/VocalsModel.mlmodelc
+          xcrun coremlcompiler compile /tmp/VocalsModel.mlpackage SingMatch/Resources/
+          ls -la SingMatch/Resources/VocalsModel.mlmodelc
       - name: Generate Xcode project
         script: |
           brew install xcodegen
           xcodegen generate
-      - name: Resolve Swift packages
-        script: |
-          xcodebuild -resolvePackageDependencies \
-            -project SingMatch.xcodeproj \
-            -scheme SingMatch
       - name: Set up code signing
         script: xcode-project use-profiles
       - name: Set build number (one higher than the latest on TestFlight)
