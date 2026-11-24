@@ -25,7 +25,11 @@ workflows:
           uv venv -p 3.11 /tmp/cmenv
           source /tmp/cmenv/bin/activate
           uv pip install "torch==2.7.0" "torchvision==0.22.0" "coremltools==9.0" onnx onnx2torch onnxruntime "numpy<2"
-          python scripts/convert_model.py /tmp/vocals.onnx /tmp/VocalsModel.mlpackage
+          python scripts/convert_model.py /tmp/vocals.onnx /tmp/VocalsModel.mlpackage || {
+            echo "=== Conversion check failed: finding the first op Core ML gets wrong ==="
+            python scripts/debug_model.py /tmp/vocals.onnx 2>&1 | grep -v -E "Converting|Running|MLModel|ComputeDevice|ComputePlan"
+            exit 1
+          }
           rm -rf SingMatch/Resources/VocalsModel.mlmodelc
           xcrun coremlcompiler compile /tmp/VocalsModel.mlpackage SingMatch/Resources/
           ls -la SingMatch/Resources/VocalsModel.mlmodelc
