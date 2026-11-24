@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from onnx2torch import convert
 import coremltools as ct
 
-SRC, DST = sys.argv[1], sys.argv[2]
+SRC = sys.argv[1]
 SHAPE = (1, 4, 3072, 256)
 torch.set_grad_enabled(False)
 ON_MAC = platform.system() == "Darwin"
@@ -47,6 +47,19 @@ class Upsample2x(nn.Module):
         return F.pixel_shuffle(z, 2) + self.b   # -> (N, Cout, 2H, 2W)
 
 
+class Downsample2x(nn.Module):
+    """Conv2d(kernel 2, stride 2, no padding) as pixel-unshuffle + 1x1 conv (exactly equivalent).
+    Core ML's CPU kernel for the strided conv gives wrong results on large inputs."""
+    def __init__(self, conv):
+        super().__init__()
+        w = conv.weight                      # (Cout, Cin, 2, 2) -> (Cout, Cin*4, 1, 1), order (c, a, b)
+        self.register_buffer("w", w.reshape(w.shape[0], -1, 1, 1).clone())
+        self.register_buffer("b", conv.bias.clone() if conv.bias is not None else torch.zeros(w.shape[0]))
+
+    def forward(self, x):
+        return F.conv2d(F.pixel_unshuffle(x, 2), self.w, self.b)
+
+
 def rewrite(model):
     for name, mod in list(model.named_modules()):
         if not name:
@@ -58,6 +71,10 @@ def rewrite(model):
                 and tuple(mod.stride) == (2, 2) and tuple(mod.padding) == (0, 0) \
                 and tuple(mod.output_padding) == (0, 0) and mod.groups == 1:
             new = Upsample2x(mod)
+        elif isinstance(mod, nn.Conv2d) and tuple(mod.kernel_size) == (2, 2) \
+                and tuple(mod.stride) == (2, 2) and mod.padding in ((0, 0), "valid", 0) \
+                and tuple(mod.dilation) == (1, 1) and mod.groups == 1 and mod.padding_mode == "zeros":
+            new = Downsample2x(mod)
         if new is not None:
             parent_name, _, attr = name.rpartition(".")
             parent = model.get_submodule(parent_name) if parent_name else model
@@ -103,36 +120,38 @@ def reference():
     return x, ort.InferenceSession(SRC).run(None, {"input": x})[0]
 
 
-variants = ["rewritten", "rewritten-nofuse", "default", "nofuse"]
-x, ref = reference() if ON_MAC else (None, None)
-scale = float(np.abs(ref).max()) if ON_MAC else 1.0
+if __name__ == "__main__":
+    DST = sys.argv[2]
+    variants = ["rewritten", "rewritten-nofuse", "default", "nofuse"]
+    x, ref = reference() if ON_MAC else (None, None)
+    scale = float(np.abs(ref).max()) if ON_MAC else 1.0
 
-for v in variants:
-    print(f"--- variant: {v}", flush=True)
-    ml = build(v)
-    tmp = f"/tmp/candidate-{v}.mlpackage"
-    shutil.rmtree(tmp, ignore_errors=True)
-    ml.save(tmp)
-    del ml
-    gc.collect()
-    if not ON_MAC:
-        print("Not on a Mac, can't run Core ML to verify; keeping", v)
-        shutil.rmtree(DST, ignore_errors=True)
-        shutil.move(tmp, DST)
-        sys.exit(0)
-    ok = True
-    for units in (ct.ComputeUnit.CPU_ONLY, ct.ComputeUnit.CPU_AND_GPU):
-        got = ct.models.MLModel(tmp, compute_units=units).predict({"input": x})["output"]
-        err = float(np.abs(got - ref).max())
-        print(f"    {units.name}: max diff {err:.2e} (output scale {scale:.2f})", flush=True)
-        if err > 2e-2 * max(scale, 1.0):
-            ok = False
-            break
-    if ok:
-        shutil.rmtree(DST, ignore_errors=True)
-        shutil.move(tmp, DST)
-        print(f"Using variant '{v}', saved {DST}")
-        sys.exit(0)
-    shutil.rmtree(tmp, ignore_errors=True)
+    for v in variants:
+        print(f"--- variant: {v}", flush=True)
+        ml = build(v)
+        tmp = f"/tmp/candidate-{v}.mlpackage"
+        shutil.rmtree(tmp, ignore_errors=True)
+        ml.save(tmp)
+        del ml
+        gc.collect()
+        if not ON_MAC:
+            print("Not on a Mac, can't run Core ML to verify; keeping", v)
+            shutil.rmtree(DST, ignore_errors=True)
+            shutil.move(tmp, DST)
+            sys.exit(0)
+        ok = True
+        for units in (ct.ComputeUnit.CPU_ONLY, ct.ComputeUnit.CPU_AND_GPU):
+            got = ct.models.MLModel(tmp, compute_units=units).predict({"input": x})["output"]
+            err = float(np.abs(got - ref).max())
+            print(f"    {units.name}: max diff {err:.2e} (output scale {scale:.2f})", flush=True)
+            if err > 2e-2 * max(scale, 1.0):
+                ok = False
+                break
+        if ok:
+            shutil.rmtree(DST, ignore_errors=True)
+            shutil.move(tmp, DST)
+            print(f"Using variant '{v}', saved {DST}")
+            sys.exit(0)
+        shutil.rmtree(tmp, ignore_errors=True)
 
-sys.exit("No conversion of the model matched the original")
+    sys.exit("No conversion of the model matched the original")
