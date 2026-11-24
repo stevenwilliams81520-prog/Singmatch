@@ -3,7 +3,7 @@
 Import a song → the vocals are split from the music on the phone → the vocal melody is written out as notes → sing along and see your pitch against the notes, with a live score.
 
 ## Features
-- **Import** any audio file from Files (MP3, M4A, WAV, AIFF, FLAC…), up to 10 minutes.
+- **Import** any audio file from Files (MP3, M4A, WAV, AIFF, FLAC…), **or a video** from Files or your Photos library (MP4, MOV, M4V…). The soundtrack is taken from the video automatically. Up to 10 minutes.
 - **Vocal separation on the phone** using the open-source UVR MDX-Net "Voc_FT" model, run with Apple's Core ML. No server and no upload.
 - **Notation**: the melody is detected from the isolated vocal (YIN pitch tracking) and shown as a scrolling note lane with note names (C4, F♯3…).
 - **Sing and match**: the mic pitch is drawn live as a trail. Green means you're in tune, pink means you're off. It shows cents sharp/flat, colours each note by how well you hit it, and gives a % score. Your best score is saved for each song.

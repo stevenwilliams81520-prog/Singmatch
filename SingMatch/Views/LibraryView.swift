@@ -1,10 +1,13 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import PhotosUI
 
 struct LibraryView: View {
     @EnvironmentObject var store: SongStore
     @EnvironmentObject var processor: SongProcessor
     @State private var showImporter = false
+    @State private var showPhotos = false
+    @State private var photoItem: PhotosPickerItem?
 
     var body: some View {
         NavigationStack {
@@ -26,12 +29,18 @@ struct LibraryView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button { showImporter = true } label: { Label("Add song", systemImage: "plus") }
+                    addMenu { Label("Add song", systemImage: "plus") }
                         .disabled(processor.isBusy)
                 }
             }
-            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.audio]) { result in
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.audio, .movie]) { result in
                 if case .success(let url) = result { processor.start(url: url, store: store) }
+            }
+            .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .videos)
+            .onChange(of: photoItem) { item in
+                guard let item else { return }
+                photoItem = nil
+                processor.start(photoItem: item, store: store)
             }
             .sheet(isPresented: Binding(get: { processor.stage != .idle }, set: { _ in })) {
                 ProcessingView().environmentObject(processor)
@@ -41,18 +50,29 @@ struct LibraryView: View {
         }
     }
 
+    private func addMenu<L: View>(@ViewBuilder label: () -> L) -> some View {
+        Menu {
+            Button { showImporter = true } label: {
+                Label("Song or video from Files", systemImage: "folder")
+            }
+            Button { showPhotos = true } label: {
+                Label("Video from Photos", systemImage: "photo.on.rectangle")
+            }
+        } label: { label() }
+    }
+
     private var emptyState: some View {
         VStack(spacing: 18) {
             Image(systemName: "music.mic")
                 .font(.system(size: 64))
                 .foregroundStyle(.tint)
             Text("Add a song to get started").font(.title3.bold())
-            Text("Pick an audio file (MP3, M4A, WAV…). Sing Match splits the vocals from the music on your phone, writes out the melody as notes, then shows you how closely you're singing along.")
+            Text("Pick a song or a video (MP3, M4A, WAV, MP4, MOV…). Sing Match takes the sound, splits the vocals from the music on your phone, writes out the melody as notes, then shows you how closely you're singing along.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 32)
-            Button { showImporter = true } label: {
-                Label("Choose a song", systemImage: "plus.circle.fill").font(.headline)
+            addMenu {
+                Label("Choose a song or video", systemImage: "plus.circle.fill").font(.headline)
             }
             .buttonStyle(.borderedProminent)
             Label("Headphones give the best results", systemImage: "headphones")
@@ -105,8 +125,10 @@ struct ProcessingView: View {
 
     @ViewBuilder private var stepView: some View {
         switch processor.stage {
+        case .loadingVideo:
+            step("Loading video from Photos", nil)
         case .decoding:
-            step("Reading song", nil)
+            step("Taking the sound from your file", nil)
         case .separating(let p):
             step("Separating vocals", p)
         case .findingMelody(let p):

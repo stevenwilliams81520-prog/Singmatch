@@ -1,5 +1,8 @@
 import Foundation
 import UIKit
+import PhotosUI
+import SwiftUI
+import UniformTypeIdentifiers
 
 /// Thread-safe cancel flag shared with the background work.
 final class CancelFlag {
@@ -14,6 +17,7 @@ final class CancelFlag {
 final class SongProcessor: ObservableObject {
     enum Stage: Equatable {
         case idle
+        case loadingVideo
         case decoding
         case separating(Double)
         case findingMelody(Double)
@@ -30,9 +34,28 @@ final class SongProcessor: ObservableObject {
         switch stage { case .idle, .failed: return false; default: return true }
     }
 
-    func start(url: URL, store: SongStore) {
+    /// Video chosen from the Photos library.
+    func start(photoItem: PhotosPickerItem, store: SongStore) {
         guard !isBusy else { return }
-        title = url.deletingPathExtension().lastPathComponent
+        let photoTitle = "Video \(Date().formatted(date: .abbreviated, time: .shortened))"
+        title = photoTitle
+        stage = .loadingVideo
+        task = Task { [weak self] in
+            do {
+                guard let movie = try await photoItem.loadTransferable(type: PickedMovie.self) else {
+                    throw AudioIOError.unreadable
+                }
+                guard let self else { return }
+                self.start(url: movie.url, store: store, title: photoTitle, isTemporary: true)
+            } catch {
+                self?.stage = .failed("Couldn't load that video: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func start(url: URL, store: SongStore, title customTitle: String? = nil, isTemporary: Bool = false) {
+        guard !isBusy || stage == .loadingVideo else { return }
+        title = customTitle ?? url.deletingPathExtension().lastPathComponent
         stage = .decoding
 
         // Copy out of the Files sandbox first
@@ -48,6 +71,7 @@ final class SongProcessor: ObservableObject {
             return
         }
         if scoped { url.stopAccessingSecurityScopedResource() }
+        if isTemporary { try? FileManager.default.removeItem(at: url) }
 
         let flag = CancelFlag()
         self.flag = flag
@@ -61,8 +85,8 @@ final class SongProcessor: ObservableObject {
                 if flag.isCancelled { throw CancellationError() }
                 await MainActor.run { self.stage = .decoding }
 
-                let meta = try await Task.detached(priority: .userInitiated) { () throws -> SongMeta in
-                    var audio = try AudioIO.decode(url: local)
+                let meta = try await Task.detached(priority: .userInitiated) { () async throws -> SongMeta in
+                    var audio = try await AudioIO.decodeAny(url: local)
                     try? FileManager.default.removeItem(at: local)
                     if flag.isCancelled { throw CancellationError() }
 
@@ -128,5 +152,21 @@ final class SongProcessor: ObservableObject {
 
     func dismissError() {
         if case .failed = stage { stage = .idle }
+    }
+}
+
+/// Lets the Photos picker hand over a video as a file we can read.
+struct PickedMovie: Transferable {
+    let url: URL
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { movie in
+            SentTransferredFile(movie.url)
+        } importing: { received in
+            let ext = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
+            let dest = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
+            try FileManager.default.copyItem(at: received.file, to: dest)
+            return PickedMovie(url: dest)
+        }
     }
 }
