@@ -4,19 +4,21 @@ options:
   deploymentTarget:
     iOS: "16.0"
   createIntermediateGroups: true
-packages:
-  onnxruntime:
-    url: https://github.com/microsoft/onnxruntime-swift-package-manager
-    from: 1.17.0
 targets:
   SingMatch:
     type: application
     platform: iOS
     sources:
       - path: SingMatch
-    dependencies:
-      - package: onnxruntime
-        product: onnxruntime
+        excludes:
+          - "Resources/VocalsModel.mlmodelc"
+          - "Resources/VocalsModel.mlmodelc/**"
+          - "Resources/*.onnx"
+          - "Resources/*.mlpackage/**"
+      # Compiled Core ML model (created by the Codemagic build), bundled as-is
+      - path: SingMatch/Resources/VocalsModel.mlmodelc
+        type: folder
+        buildPhase: resources
     info:
       path: SingMatch/Info.plist
       properties:

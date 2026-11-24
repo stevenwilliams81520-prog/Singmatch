@@ -4,7 +4,7 @@ Import a song → the vocals are split from the music on the phone → the vocal
 
 ## Features
 - **Import** any audio file from Files (MP3, M4A, WAV, AIFF, FLAC…), up to 10 minutes.
-- **Vocal separation on the phone** using the open-source UVR MDX-Net "Voc_FT" model, run with ONNX Runtime. No server and no upload.
+- **Vocal separation on the phone** using the open-source UVR MDX-Net "Voc_FT" model, run with Apple's Core ML. No server and no upload.
 - **Notation**: the melody is detected from the isolated vocal (YIN pitch tracking) and shown as a scrolling note lane with note names (C4, F♯3…).
 - **Sing and match**: the mic pitch is drawn live as a trail. Green means you're in tune, pink means you're off. It shows cents sharp/flat, colours each note by how well you hit it, and gives a % score. Your best score is saved for each song.
 - **Octave options**: buttons for Deeper/Higher (±3 octaves), **Auto** (picks the octave you're actually singing in), **Any octave counts**, and you can choose to shift the guide vocal too.
@@ -16,17 +16,17 @@ Import a song → the vocals are split from the music on the phone → the vocal
 1. In the Apple Developer portal, register the bundle ID `com.stevenwilliams.singmatch`. Then create the app in App Store Connect.
 2. Push this folder to a new GitHub repo and add it in Codemagic.
 3. `codemagic.yaml` already uses your **Berfau ASC** integration. It will:
-   - download the 67 MB vocal model and bundle it into the app
+   - download the vocal model, convert it to Core ML, check it still matches the original, and bundle it into the app
    - generate the Xcode project with XcodeGen (no Mac needed)
    - sign the app, build the IPA and upload it to TestFlight
-4. If the model ever isn't bundled, the app downloads it once on first import.
 
 ## Project layout
 ```
 SingMatch/App/       SwiftUI app entry, song library + storage
 SingMatch/Audio/     decoding, STFT + ONNX vocal separation, YIN pitch, melody extraction, playback/mic session
 SingMatch/Views/     library, processing sheet, sing screen, scrolling piano roll
-project.yml          XcodeGen project (ONNX Runtime via Swift Package Manager)
+project.yml          XcodeGen project (no third-party packages)
+scripts/             ONNX → Core ML model conversion, run during the Codemagic build
 codemagic.yaml       CI build → TestFlight
 ```
 

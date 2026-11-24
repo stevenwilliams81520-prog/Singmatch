@@ -14,7 +14,6 @@ final class CancelFlag {
 final class SongProcessor: ObservableObject {
     enum Stage: Equatable {
         case idle
-        case downloadingModel(Double)
         case decoding
         case separating(Double)
         case findingMelody(Double)
@@ -57,9 +56,7 @@ final class SongProcessor: ObservableObject {
 
         task = Task { [weak self] in
             do {
-                let modelURL = try await ModelProvider.ensureModel { p in
-                    Task { @MainActor in self?.stage = .downloadingModel(p) }
-                }
+                let modelURL = try ModelProvider.ensureModel()
                 if flag.isCancelled { throw CancellationError() }
                 await MainActor.run { self?.stage = .decoding }
 

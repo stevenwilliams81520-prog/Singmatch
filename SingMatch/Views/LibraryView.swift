@@ -105,8 +105,6 @@ struct ProcessingView: View {
 
     @ViewBuilder private var stepView: some View {
         switch processor.stage {
-        case .downloadingModel(let p):
-            step("Downloading vocal model (one time only)", p)
         case .decoding:
             step("Reading song", nil)
         case .separating(let p):

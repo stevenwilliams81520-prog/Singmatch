@@ -1,10 +1,6 @@
 import Foundation
 import Accelerate
-#if canImport(OnnxRuntimeBindings)
-import OnnxRuntimeBindings      // Swift Package Manager module name
-#elseif canImport(onnxruntime_objc)
-import onnxruntime_objc         // CocoaPods module name
-#endif
+import CoreML
 
 /// STFT / iSTFT matching the MDX-Net (UVR-MDX-NET-Voc_FT) training setup:
 /// n_fft 7680, hop 1024, 3072 frequency bins, 256 frames per chunk, periodic Hann,
@@ -103,46 +99,49 @@ final class MDXSpectral {
 }
 
 enum SeparationError: LocalizedError {
-    case setupFailed, noOutput
+    case setupFailed, noOutput, modelMissing
     var errorDescription: String? {
         switch self {
         case .setupFailed: return "Couldn't set up the audio processor."
         case .noOutput: return "The separation model returned no output."
+        case .modelMissing: return "The vocal separation model is missing from the app."
         }
     }
 }
 
-/// Runs the MDX-Net vocal model over the whole song in chunks.
+/// Runs the MDX-Net vocal model (Core ML) over the whole song in chunks.
 final class VocalSeparator {
-    private let env: ORTEnv
-    private let session: ORTSession
-    private let inputName: String
-    private let outputName: String
+    private let model: MLModel
     private let compensate: Float = 1.021
 
     init(modelURL: URL) throws {
-        env = try ORTEnv(loggingLevel: .warning)
-        let options = try ORTSessionOptions()
-        try options.setIntraOpNumThreads(Int32(max(2, min(6, ProcessInfo.processInfo.activeProcessorCount))))
-        try options.setGraphOptimizationLevel(.all)
-        session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: options)
-        inputName = (try? session.inputNames().first) ?? "input"
-        outputName = (try? session.outputNames().first) ?? "output"
+        let config = MLModelConfiguration()
+        config.computeUnits = .cpuAndGPU     // fp32 model: GPU/CPU
+        model = try MLModel(contentsOf: modelURL, configuration: config)
     }
 
     /// Returns the vocal stem (same length as the input).
     func separate(left: [Float], right: [Float],
                   progress: (Double) -> Void,
                   isCancelled: () -> Bool) throws -> (left: [Float], right: [Float]) {
-        guard let spectral = MDXSpectral(),
-              let tensorData = NSMutableData(length: MDXSpectral.tensorCount * MemoryLayout<Float>.size) else {
-            throw SeparationError.setupFailed
-        }
+        guard let spectral = MDXSpectral() else { throw SeparationError.setupFailed }
+        let F = MDXSpectral.dimF, T = MDXSpectral.dimT
+        let count = MDXSpectral.tensorCount
+        let tensor = UnsafeMutablePointer<Float>.allocate(capacity: count)
+        defer { tensor.deallocate() }
+        let outBuf = UnsafeMutablePointer<Float>.allocate(capacity: count)
+        defer { outBuf.deallocate() }
+
+        let shape: [NSNumber] = [1, 4, NSNumber(value: F), NSNumber(value: T)]
+        let strides: [NSNumber] = [NSNumber(value: 4 * F * T), NSNumber(value: F * T), NSNumber(value: T), 1]
+        let inputArray = try MLMultiArray(dataPointer: tensor, shape: shape, dataType: .float32,
+                                          strides: strides, deallocator: nil)
+        let provider = try MLDictionaryFeatureProvider(dictionary: ["input": MLFeatureValue(multiArray: inputArray)])
+
         let n = left.count
         let gen = MDXSpectral.gen, trim = MDXSpectral.trim, chunk = MDXSpectral.chunk
         let total = n % gen == 0 ? n : n + (gen - n % gen)
         let chunks = max(1, total / gen)
-        let shape: [NSNumber] = [1, 4, NSNumber(value: MDXSpectral.dimF), NSNumber(value: MDXSpectral.dimT)]
 
         var vocalsL = [Float](repeating: 0, count: n)
         var vocalsR = [Float](repeating: 0, count: n)
@@ -155,24 +154,22 @@ final class VocalSeparator {
             if isCancelled() { throw CancellationError() }
             try autoreleasepool {
                 let start = ci * gen
-                // Chunk covers padded positions start ..< start+chunk, i.e. song samples start-trim ..< start-trim+chunk
+                // Chunk covers song samples start-trim ..< start-trim+chunk (zero outside the song)
                 for i in 0..<chunk {
                     let s = start - trim + i
                     if s >= 0 && s < n { chunkL[i] = left[s]; chunkR[i] = right[s] }
                     else { chunkL[i] = 0; chunkR[i] = 0 }
                 }
-                let tp = tensorData.mutableBytes.assumingMemoryBound(to: Float.self)
-                chunkL.withUnsafeBufferPointer { spectral.forward($0.baseAddress!, into: tp, reChannel: 0, imChannel: 1) }
-                chunkR.withUnsafeBufferPointer { spectral.forward($0.baseAddress!, into: tp, reChannel: 2, imChannel: 3) }
+                chunkL.withUnsafeBufferPointer { spectral.forward($0.baseAddress!, into: tensor, reChannel: 0, imChannel: 1) }
+                chunkR.withUnsafeBufferPointer { spectral.forward($0.baseAddress!, into: tensor, reChannel: 2, imChannel: 3) }
 
-                let input = try ORTValue(tensorData: tensorData, elementType: .float, shape: shape)
-                let outputs = try session.run(withInputs: [inputName: input],
-                                              outputNames: [outputName], runOptions: nil)
-                guard let value = outputs[outputName] else { throw SeparationError.noOutput }
-                let outData = try value.tensorData()
-                let op = outData.bytes.assumingMemoryBound(to: Float.self)
-                spectral.inverse(op, reChannel: 0, imChannel: 1, into: &outL)
-                spectral.inverse(op, reChannel: 2, imChannel: 3, into: &outR)
+                let result = try model.prediction(from: provider)
+                guard let out = result.featureValue(for: "output")?.multiArrayValue else {
+                    throw SeparationError.noOutput
+                }
+                try Self.copyContiguous(out, into: outBuf, shape: [4, F, T])
+                spectral.inverse(outBuf, reChannel: 0, imChannel: 1, into: &outL)
+                spectral.inverse(outBuf, reChannel: 2, imChannel: 3, into: &outR)
 
                 for i in 0..<gen {
                     let s = start + i
@@ -185,81 +182,43 @@ final class VocalSeparator {
         }
         return (vocalsL, vocalsR)
     }
+
+    /// Copies a [1,4,F,T] MLMultiArray into a packed float buffer, honouring its strides
+    /// (Core ML may pad rows) and converting from float16/double if needed.
+    private static func copyContiguous(_ a: MLMultiArray, into dst: UnsafeMutablePointer<Float>, shape: [Int]) throws {
+        let st = a.strides.map(\.intValue)
+        guard st.count == 4 else { throw SeparationError.noOutput }
+        let (C, F, T) = (shape[0], shape[1], shape[2])
+        let packed = st[3] == 1 && st[2] == T && st[1] == F * T
+        switch a.dataType {
+        case .float32:
+            let p = a.dataPointer.bindMemory(to: Float.self, capacity: 1)
+            if packed { dst.update(from: p, count: C * F * T); return }
+            for c in 0..<C { for f in 0..<F { for t in 0..<T {
+                dst[c * F * T + f * T + t] = p[c * st[1] + f * st[2] + t * st[3]]
+            } } }
+        case .double:
+            let p = a.dataPointer.bindMemory(to: Double.self, capacity: 1)
+            for c in 0..<C { for f in 0..<F { for t in 0..<T {
+                dst[c * F * T + f * T + t] = Float(p[c * st[1] + f * st[2] + t * st[3]])
+            } } }
+        default:
+            // float16 or other: go through the NSNumber accessor (slow, but correct)
+            for c in 0..<C { for f in 0..<F { for t in 0..<T {
+                dst[c * F * T + f * T + t] = a[[0, c, f, t] as [NSNumber]].floatValue
+            } } }
+        }
+    }
 }
 
-/// Finds the separation model: bundled with the app, or downloaded once on first use.
+/// The Core ML model is compiled at build time and bundled with the app.
 enum ModelProvider {
-    static let fileName = "vocals.onnx"
-    static let downloadURL = URL(string:
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx")!
-
-    static var downloadedURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent(fileName)
+    static var bundledURL: URL? {
+        Bundle.main.url(forResource: "VocalsModel", withExtension: "mlmodelc")
     }
 
-    static var availableURL: URL? {
-        if let b = Bundle.main.url(forResource: "vocals", withExtension: "onnx") { return b }
-        let d = downloadedURL
-        if let size = (try? FileManager.default.attributesOfItem(atPath: d.path))?[.size] as? NSNumber,
-           size.intValue > 50_000_000 { return d }
-        return nil
-    }
-
-    static func ensureModel(progress: @escaping (Double) -> Void) async throws -> URL {
-        if let url = availableURL { return url }
-        let downloader = ModelDownloader(destination: downloadedURL, progress: progress)
-        return try await downloader.download(from: downloadURL)
-    }
-}
-
-final class ModelDownloader: NSObject, URLSessionDownloadDelegate {
-    private let destination: URL
-    private let progress: (Double) -> Void
-    private var continuation: CheckedContinuation<URL, Error>?
-    private var session: URLSession?
-
-    init(destination: URL, progress: @escaping (Double) -> Void) {
-        self.destination = destination
-        self.progress = progress
-    }
-
-    func download(from url: URL) async throws -> URL {
-        try await withCheckedThrowingContinuation { cont in
-            self.continuation = cont
-            let s = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-            self.session = s
-            s.downloadTask(with: url).resume()
-        }
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
-                    totalBytesExpectedToWrite: Int64) {
-        guard totalBytesExpectedToWrite > 0 else { return }
-        progress(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
-    }
-
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                    didFinishDownloadingTo location: URL) {
-        do {
-            try? FileManager.default.removeItem(at: destination)
-            try FileManager.default.moveItem(at: location, to: destination)
-            finish(.success(destination))
-        } catch {
-            finish(.failure(error))
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error { finish(.failure(error)) }
-        session.finishTasksAndInvalidate()
-    }
-
-    private func finish(_ result: Result<URL, Error>) {
-        guard let c = continuation else { return }
-        continuation = nil
-        c.resume(with: result)
+    static func ensureModel() throws -> URL {
+        guard let url = bundledURL else { throw SeparationError.modelMissing }
+        return url
     }
 }
